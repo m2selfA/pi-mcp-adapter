@@ -1,6 +1,6 @@
 import type { AgentToolUpdateCallback, ExtensionAPI, ExtensionContext, ToolInfo } from "@earendil-works/pi-coding-agent";
 import type { McpExtensionState } from "./state.ts";
-import type { DirectToolSpec, McpAdapterOptions, McpConfig, PromptMetadata } from "./types.ts";
+import type { CachedPrompt, CachedResource, CachedTool, DirectToolSpec, McpAdapterOptions, McpConfig, McpResource, PromptMetadata, ServerCacheEntry } from "./types.ts";
 import type { McpOAuthRuntime } from "./mcp-auth-flow.ts";
 import { Type } from "typebox";
 import type { TSchema } from "typebox";
@@ -20,6 +20,7 @@ import { createMcpRuntimeOwner, createOwnedUi, isAbortError, type McpRuntimeOwne
 import { publishMcpStatusShutdown } from "./mcp-status.ts";
 import { runMcpScript } from "./mcp-code.ts";
 import { cleanupMaterializedBinaryResources } from "./tool-registrar.ts";
+import { installMcpContext } from "./mcp-context.ts";
 
 export type { McpAdapterOptions } from "./types.ts";
 export {
@@ -903,6 +904,75 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
 
   const initialDirectTools = syncDirectTools(earlyConfig, earlyCache).specs;
   syncProxyTool(earlyConfig, earlyCache, initialDirectTools);
+
+  // Inlined pi-mcp-context companion: #server mention expansion, /mcp:<server>
+  // commands, and # / : autocomplete. The catalog is built from live adapter
+  // state (connected servers' tool/prompt metadata) and falls back to the
+  // persisted mcp-cache.json for not-yet-connected or cached-only servers.
+  const buildLiveCatalog = (): MetadataCache => {
+    const fileCache = loadMetadataCache();
+    const servers: Record<string, ServerCacheEntry> = {};
+    const knownNames = new Set<string>([
+      ...Object.keys(fileCache?.servers ?? {}),
+      ...(state ? Object.keys(state.config.mcpServers) : []),
+      ...(state ? [...state.toolMetadata.keys()] : []),
+    ]);
+    for (const name of knownNames) {
+      const fileEntry = fileCache?.servers[name];
+      const toolsMetadata = state?.toolMetadata.get(name);
+      const connection = state?.manager.getConnection(name);
+      const liveResources = connection?.status === "connected" ? connection.resources : undefined;
+      const liveInstructions = state?.serverInstructions.get(name);
+
+      const tools: CachedTool[] = toolsMetadata
+        ? toolsMetadata.map((tool) => ({
+            name: tool.originalName,
+            ...(tool.description ? { description: tool.description } : {}),
+            ...(tool.inputSchema !== undefined ? { inputSchema: tool.inputSchema } : {}),
+            ...(tool.resourceUri ? { resourceUri: tool.resourceUri } : {}),
+          }))
+        : (fileEntry?.tools ?? []);
+
+      const resources: CachedResource[] = liveResources
+        ? liveResources.map((resource) => ({
+            uri: resource.uri,
+            name: resource.name,
+            ...(resource.description ? { description: resource.description } : {}),
+          }))
+        : (fileEntry?.resources ?? []);
+
+      const prompts: CachedPrompt[] | undefined = state?.promptMetadata.get(name)
+        ? (state.promptMetadata.get(name) ?? []).map((prompt) => ({
+            name: prompt.originalName,
+            ...(prompt.title ? { title: prompt.title } : {}),
+            ...(prompt.description ? { description: prompt.description } : {}),
+            ...(Array.isArray(prompt.arguments)
+              ? {
+                  arguments: prompt.arguments.map((argument) => ({
+                    name: argument.name,
+                    ...(argument.description ? { description: argument.description } : {}),
+                    ...(argument.required !== undefined ? { required: argument.required } : {}),
+                  })),
+                }
+              : {}),
+          }))
+        : fileEntry?.prompts;
+
+      const instructions = liveInstructions ?? fileEntry?.instructions;
+      servers[name] = {
+        configHash: fileEntry?.configHash ?? "",
+        tools,
+        resources,
+        ...(prompts ? { prompts } : {}),
+        ...(instructions ? { instructions } : {}),
+        cachedAt: fileEntry?.cachedAt ?? Date.now(),
+      };
+    }
+    return { version: 1, servers };
+  };
+
+  installMcpContext(pi, { getCatalog: () => (state ? buildLiveCatalog() : loadMetadataCache()) });
+
   startLoadTimeInitialization();
 }
 
