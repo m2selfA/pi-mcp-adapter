@@ -13,6 +13,9 @@
 // the connection or the agent's turn.
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import { getAgentPath } from "./agent-dir.ts";
 import type { McpExtensionState } from "./state.ts";
 import type { ServerConnection } from "./server-manager.ts";
 import type { Transport } from "./types.ts";
@@ -48,6 +51,59 @@ const MAX_POLL_INTERVAL_MS = 5 * 60 * 1000;
 const MIN_POLL_INTERVAL_MS = 1_000;
 const MAX_INPUT_ROUNDS = 10;
 
+const TASKS_FILE = "mcp-tasks.json";
+
+interface PersistedTask {
+  serverName: string;
+  taskId: string;
+  status: TaskStatus;
+  pollIntervalMs: number;
+  toolName: string | undefined;
+  createdAt: number;
+}
+
+function getTasksFilePath(): string {
+  return getAgentPath(TASKS_FILE);
+}
+
+function loadPersistedTasks(): PersistedTask[] {
+  const path = getTasksFilePath();
+  if (!existsSync(path)) return [];
+  try {
+    const raw = JSON.parse(readFileSync(path, "utf8"));
+    if (!isRecord(raw) || !Array.isArray(raw.tasks)) return [];
+    return raw.tasks.filter((t: unknown): t is PersistedTask =>
+      isRecord(t)
+      && typeof t.serverName === "string"
+      && typeof t.taskId === "string"
+      && typeof t.status === "string"
+      && typeof t.pollIntervalMs === "number"
+      && typeof t.createdAt === "number",
+    );
+  } catch {
+    return [];
+  }
+}
+
+function savePersistedTasks(tasks: Iterable<TrackedTask>): void {
+  const path = getTasksFilePath();
+  const dir = dirname(path);
+  mkdirSync(dir, { recursive: true });
+  const persisted: PersistedTask[] = [...tasks]
+    .filter((t) => !isTerminal(t.status))
+    .map((t) => ({
+      serverName: t.serverName,
+      taskId: t.taskId,
+      status: t.status,
+      pollIntervalMs: t.pollIntervalMs,
+      toolName: t.toolName,
+      createdAt: t.createdAt,
+    }));
+  const tmpPath = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmpPath, JSON.stringify({ tasks: persisted }, null, 2), "utf8");
+  renameSync(tmpPath, path);
+}
+
 export interface TaskManagerOptions {
   getState: () => McpExtensionState | null;
   pi: ExtensionAPI;
@@ -58,9 +114,19 @@ export class McpTasksManager {
   /** Interceptors keyed by serverName, so we don't double-install on reconnect. */
   private interceptors = new Map<string, () => void>();
   private options: TaskManagerOptions;
+  private samplingBridge: ((serverName: string, params: unknown) => Promise<unknown>) | undefined;
 
   constructor(options: TaskManagerOptions) {
     this.options = options;
+  }
+
+  /**
+   * Set the sampling bridge for sampling/createMessage input requests inside
+   * tasks. Called by the host during session_start when the ExtensionContext
+   * (modelRegistry, currentModel) becomes available.
+   */
+  setSamplingBridge(bridge: (serverName: string, params: unknown) => Promise<unknown>): void {
+    this.samplingBridge = bridge;
   }
 
   /**
@@ -99,6 +165,39 @@ export class McpTasksManager {
     // Start a task-filtered subscriptions/listen on the transport so the server
     // can push notifications/tasks instead of relying on polling alone.
     this.startListening(serverName, connection.transport);
+
+    // Resume polling any non-terminal tasks persisted from a previous session
+    // that belong to this server.
+    this.resumePersistedTasks(serverName);
+  }
+
+  /**
+   * Resume polling for tasks that were still running when Pi shut down.
+   * Called after attachServer installs the interceptor + listen.
+   */
+  private resumePersistedTasks(serverName: string): void {
+    const persisted = loadPersistedTasks();
+    for (const p of persisted) {
+      if (p.serverName !== serverName) continue;
+      if (this.tasks.has(p.taskId)) continue; // already tracked
+      const tracked: TrackedTask = {
+        serverName: p.serverName,
+        taskId: p.taskId,
+        status: p.status,
+        pollIntervalMs: p.pollIntervalMs,
+        createdAt: p.createdAt,
+        lastPolledAt: Date.now(),
+        resolvedInputKeys: new Set(),
+        toolName: p.toolName,
+        woke: false,
+        abortController: new AbortController(),
+      };
+      this.tasks.set(p.taskId, tracked);
+      void this.pollLoop(tracked).catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        this.wakeAgent(tracked, `Resumed MCP task ${p.taskId} on ${p.serverName} encountered an error: ${message}`, true);
+      });
+    }
   }
 
   detachServer(serverName: string): void {
@@ -208,6 +307,7 @@ export class McpTasksManager {
       abortController: new AbortController(),
     };
     this.tasks.set(task.taskId, tracked);
+    savePersistedTasks(this.tasks.values());
 
     // Start polling in the background. Do not await — the caller returns the
     // handle text to the agent immediately.
@@ -314,6 +414,7 @@ export class McpTasksManager {
       const resultText = formatTaskResult(task, state);
       this.wakeAgent(task, resultText, task.status === "failed");
       this.tasks.delete(task.taskId);
+      savePersistedTasks(this.tasks.values());
     }
   }
 
@@ -345,9 +446,19 @@ export class McpTasksManager {
         const accepted = await state.ui.confirm("MCP Task Input Required", typeof message === "string" ? message : JSON.stringify(message));
         inputResponses[key] = { result: accepted ? "accepted" : "declined" };
       } else if (request.method === "sampling/createMessage") {
-        // Sampling through the adapter's sampling handler would go here.
-        // For now, decline — full sampling-in-task integration is a follow-up.
-        inputResponses[key] = { error: { code: -32601, message: "sampling within tasks not yet supported" } };
+        // Bridge through the adapter's sampling handler (same one that handles
+        // server-initiated sampling/createMessage JSON-RPC requests).
+        if (this.samplingBridge) {
+          try {
+            const samplingResult = await this.samplingBridge(task.serverName, request.params);
+            inputResponses[key] = { result: samplingResult };
+          } catch (samplingError) {
+            const message = samplingError instanceof Error ? samplingError.message : String(samplingError);
+            inputResponses[key] = { error: { code: -32603, message: `sampling failed: ${message}` } };
+          }
+        } else {
+          inputResponses[key] = { error: { code: -32601, message: "sampling within tasks not supported on this instance" } };
+        }
       } else {
         inputResponses[key] = { error: { code: -32601, message: `unsupported input method: ${request.method}` } };
       }

@@ -16,12 +16,13 @@ import { formatTerminalError, getConfigPathFromArgv, normalizeDirectToolInputSch
 import { createOAuthRuntime, shutdownOAuth } from "./mcp-auth-flow.ts";
 import { createMcpDirectToolCallRenderer, createMcpProxyToolCallRenderer, createMcpToolResultRenderer, resolveMcpToolRenderOptions } from "./tool-result-renderer.ts";
 import { toolErrorOverride } from "./error-signal.ts";
-import { createMcpRuntimeOwner, createOwnedUi, isAbortError, type McpRuntimeOwner } from "./runtime-owner.ts";
+import { createMcpRuntimeOwner, createOwnedUi, isAbortError, combineAbortSignals, type McpRuntimeOwner } from "./runtime-owner.ts";
 import { publishMcpStatusShutdown } from "./mcp-status.ts";
 import { runMcpScript } from "./mcp-code.ts";
 import { cleanupMaterializedBinaryResources } from "./tool-registrar.ts";
 import { installMcpContext } from "./mcp-context.ts";
 import { McpTasksManager } from "./mcp-tasks-manager.ts";
+import { handleSamplingRequest, type SamplingHandlerOptions } from "./sampling-handler.ts";
 
 export type { McpAdapterOptions } from "./types.ts";
 export {
@@ -75,7 +76,6 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
   let currentOwner: McpRuntimeOwner | null = null;
   let currentOAuthRuntime: McpOAuthRuntime | null = null;
   let lifecycleGeneration = 0;
-  const tasksManager = new McpTasksManager({ getState: () => state, pi });
 
   async function shutdownState(currentState: McpExtensionState | null, reason: string): Promise<void> {
     if (!currentState) {
@@ -123,6 +123,8 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
     ? cloneMcpConfig(sessionConfig)
     : loadMcpConfig(earlyConfigPath);
   const earlyCache = loadMetadataCache();
+  const tasksExtensionEnabled = earlyConfig.settings?.tasksExtension !== false;
+  const tasksManager = tasksExtensionEnabled ? new McpTasksManager({ getState: () => state, pi }) : null;
   const envRaw = process.env.MCP_DIRECT_TOOLS;
   const envDirectToolOverride = envRaw?.split(",").map(s => s.trim()).filter(Boolean);
   const registeredDirectTools = new Map<string, string>();
@@ -318,9 +320,28 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
 
       state = nextState;
       nextState.tasksManager = tasksManager;
+      // Wire the sampling bridge so task input_requests for sampling/createMessage
+      // route through the same handler as server-initiated sampling.
+      if (tasksManager) {
+        tasksManager.setSamplingBridge((serverName, params) => {
+          const samplingConfig: SamplingHandlerOptions = {
+            serverName,
+            autoApprove: nextState.config.settings?.samplingAutoApprove === true,
+            ...(nextState.ui ? { ui: nextState.ui } : {}),
+            modelRegistry: ctx.modelRegistry!,
+            getCurrentModel: () => owner.isActive() ? ctx.model : undefined,
+            getSignal: () => owner.isActive()
+              ? combineAbortSignals(owner.signal, ctx.signal)
+              : undefined,
+          };
+          return handleSamplingRequest(samplingConfig, { params } as never);
+        });
+      }
       // Attach the tasks interceptor to every already-connected server.
-      for (const name of Object.keys(nextState.config.mcpServers)) {
-        tasksManager.attachServer(name);
+      if (tasksManager) {
+        for (const name of Object.keys(nextState.config.mcpServers)) {
+          tasksManager.attachServer(name);
+        }
       }
       nextState.onToolMetadataUpdated = (_serverName, _reason) => {
         if (state !== nextState || !owner.isActive()) return;
@@ -438,7 +459,7 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
     // Abort before awaiting cleanup so delayed initialization cannot touch stale
     // Pi context after session shutdown.
     const stopOwner = owner?.stop("MCP extension session shutdown") ?? Promise.resolve();
-    tasksManager.shutdown();
+    tasksManager?.shutdown();
     try {
       await Promise.all([
         stopOwner,

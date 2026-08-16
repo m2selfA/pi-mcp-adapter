@@ -524,6 +524,13 @@ export interface McpSettings {
   sampling?: boolean;
   samplingAutoApprove?: boolean;
   elicitation?: boolean;
+  /** Enable the MCP Tasks extension (SEP-2663, io.modelcontextprotocol/tasks).
+   * When true (default), the adapter declares task eligibility on tools/call,
+   * intercepts CreateTaskResult responses, polls tasks/get in the background,
+   * and wakes the agent on terminal state. Set to false to disable all task
+   * machinery for servers that do not support it or when the overhead is
+   * unwanted. */
+  tasksExtension?: boolean;
   /**
    * Guard oversized MCP tool/resource output before it is returned to the model.
    * Defaults to true (50 KiB / 2,000 lines inline text, 16 KiB details.mcpResult).

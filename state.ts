@@ -60,5 +60,5 @@ export interface McpExtensionState {
   sendMessage?: SendMessageFn;
   onToolMetadataUpdated?: (serverName: string, reason: string) => void | Promise<void>;
   statusEvents?: McpStatusEventBus;
-  tasksManager?: McpTasksManager;
+  tasksManager?: McpTasksManager | null;
 }
