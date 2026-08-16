@@ -560,6 +560,16 @@ export class McpServerManager {
     }
   }
 
+  /**
+   * Returns the client capabilities the adapter advertises (sampling,
+   * elicitation). Exposed so the tasks wire layer can rebuild the per-request
+   * _meta envelope with the tasks extension merged in without clobbering the
+   * existing capabilities.
+   */
+  getClientCapabilities(): Record<string, unknown> {
+    return this.buildClientCapabilities();
+  }
+
   private buildClientCapabilities() {
     return {
       ...(this.samplingConfig ? { sampling: {} } : {}),

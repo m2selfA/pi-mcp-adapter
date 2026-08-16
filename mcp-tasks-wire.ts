@@ -245,6 +245,33 @@ export function buildTasksDeclarationMeta(): Record<string, unknown> {
   };
 }
 
+/**
+ * Build the _meta fragment for a tools/call that declares task eligibility
+ * while preserving the adapter's existing client capabilities (sampling,
+ * elicitation). The SDK's auto-envelope merges _meta one key deep, so writing
+ * the clientCapabilities key would replace the whole object — this function
+ * rebuilds it with the tasks extension merged into the extensions map.
+ *
+ * Pass the result as the callTool _meta (or merge it into an existing _meta
+ * such as a UI session's requestMeta).
+ */
+export function buildTasksDeclarationMetaWithCapabilities(
+  capabilities: Record<string, unknown>,
+): Record<string, unknown> {
+  const existingExtensions = isRecord(capabilities.extensions)
+    ? capabilities.extensions
+    : {};
+  return {
+    [CLIENT_CAPABILITIES_META_KEY]: {
+      ...capabilities,
+      extensions: {
+        ...existingExtensions,
+        [MCP_TASKS_EXTENSION_ID]: {},
+      },
+    },
+  };
+}
+
 // ─── internal helpers ──────────────────────────────────────────────────────
 
 let requestCounter = 0;
@@ -255,6 +282,12 @@ function generateRequestId(): number {
   // Tasks requests bypass the SDK funnel, so id collision would cause the SDK
   // to receive a response it didn't expect.
   return 0x7fff_0000 + (++requestCounter);
+}
+
+/** Generate a request id for subscriptions/listen. Uses a different range
+ *  from tasks request ids to avoid collisions. */
+export function generateListenRequestId(): number {
+  return 0x8fff_0000 + (++requestCounter);
 }
 
 function isJSONRPCResponse(message: JSONRPCMessage): message is JSONRPCMessage & { id: number | string; result?: unknown; error?: unknown } {

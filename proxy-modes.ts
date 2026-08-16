@@ -18,6 +18,7 @@ import { authenticate, completeAuthFromInput, startAuth, supportsOAuth } from ".
 import { SessionRecoveryAuthRequiredError, withSessionRecovery } from "./session-recovery.ts";
 import { paginate, rankSuggestions, rankToolMatches, resolveSearchKeywords } from "./search-ranking.ts";
 import { ensureToolCallApproved, isToolCallApprovalRequired } from "./tool-approval.ts";
+import { buildTasksDeclarationMetaWithCapabilities } from "./mcp-tasks-wire.ts";
 
 type ProxyToolResult = AgentToolResult<Record<string, unknown>>;
 type ClientCallToolResult = Awaited<ReturnType<Client["callTool"]>>;
@@ -802,6 +803,23 @@ export async function executeConnect(state: McpExtensionState, serverName: strin
     };
   }
 }
+/**
+ * Build the _meta for a tools/call request. If the tasks manager is active,
+ * injects the io.modelcontextprotocol/tasks eligibility declaration
+ * (rebuilt with existing capabilities to avoid clobbering sampling/elicitation).
+ * Merges any UI session requestMeta (stream token) on top.
+ */
+function buildCallToolMeta(
+  state: McpExtensionState,
+  uiSession: UiSessionRuntime | null,
+): Record<string, unknown> | undefined {
+  const uiMeta = uiSession?.requestMeta;
+  if (!state.tasksManager) return uiMeta;
+  const tasksMeta = buildTasksDeclarationMetaWithCapabilities(
+    state.manager.getClientCapabilities(),
+  );
+  return { ...(uiMeta ?? {}), ...tasksMeta };
+}
 
 export async function executeCall(
   state: McpExtensionState,
@@ -1245,7 +1263,7 @@ export async function executeCall(
         (conn) => abortable(conn.client.callTool({
           name: toolMeta.originalName,
           arguments: args ?? {},
-          _meta: uiSession?.requestMeta,
+          _meta: buildCallToolMeta(state, uiSession),
         }, requestOptions), ownedSignal),
       );
     } catch (taskError) {

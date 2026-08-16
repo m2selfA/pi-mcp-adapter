@@ -15,8 +15,10 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { McpExtensionState } from "./state.ts";
 import type { ServerConnection } from "./server-manager.ts";
+import type { Transport } from "./types.ts";
 import {
   buildTasksDeclarationMeta,
+  generateListenRequestId,
   installTaskMessageInterceptor,
   sendTaskRequest,
   type CreateTaskResult,
@@ -93,11 +95,16 @@ export class McpTasksManager {
       },
     );
     this.interceptors.set(serverName, detach);
+
+    // Start a task-filtered subscriptions/listen on the transport so the server
+    // can push notifications/tasks instead of relying on polling alone.
+    this.startListening(serverName, connection.transport);
   }
 
   detachServer(serverName: string): void {
     this.interceptors.get(serverName)?.();
     this.interceptors.delete(serverName);
+    this.stopListening(serverName);
     // Cancel all tasks for this server — they can't be polled without a connection.
     for (const task of this.tasks.values()) {
       if (task.serverName === serverName) {
@@ -109,6 +116,7 @@ export class McpTasksManager {
   shutdown(): void {
     for (const detach of this.interceptors.values()) detach();
     this.interceptors.clear();
+    this.listenIds.clear();
     for (const task of this.tasks.values()) task.abortController.abort();
     this.tasks.clear();
   }
@@ -122,6 +130,58 @@ export class McpTasksManager {
    */
   captureNextCreateTask(serverName: string, callback: (result: CreateTaskResult) => void): void {
     this.captureCallbacks.set(serverName, callback);
+  }
+
+  /** Active listen request ids per server, for cleanup on detach. */
+  private listenIds = new Map<string, number>();
+
+  /**
+   * Start a task-filtered subscriptions/listen on the transport. The listen
+   * request is sent directly via transport.send (bypassing the SDK funnel)
+   * with the tasks declaration in _meta. The transport interceptor (installed
+   * in attachServer) handles notifications/tasks pushes that arrive on the
+   * stream. We don't wait for the listen response — it only arrives when the
+   * stream closes. The request id is tracked for cancellation.
+   */
+  private startListening(serverName: string, transport: Transport): void {
+    const id = generateListenRequestId();
+    this.listenIds.set(serverName, id);
+
+    const params: Record<string, unknown> = {
+      notifications: { notifications: ["notifications/tasks"] },
+      _meta: buildTasksDeclarationMeta(),
+    };
+
+    const request = { jsonrpc: "2.0" as const, id, method: "subscriptions/listen", params };
+    transport.send(request as import("@modelcontextprotocol/client").JSONRPCMessage).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      // Listen failures are non-fatal — we fall back to polling.
+      void message;
+      this.listenIds.delete(serverName);
+    });
+  }
+
+  /**
+   * Cancel a server's subscriptions/listen by sending notifications/cancelled
+   * referencing the listen request id. Best-effort — failures are ignored.
+   */
+  private stopListening(serverName: string): void {
+    const id = this.listenIds.get(serverName);
+    if (id === undefined) return;
+    this.listenIds.delete(serverName);
+
+    const state = this.options.getState();
+    const connection = state?.manager.getConnection(serverName);
+    if (!connection || connection.status !== "connected") return;
+
+    const cancel = {
+      jsonrpc: "2.0" as const,
+      method: "notifications/cancelled",
+      params: { requestId: id, reason: "tasks manager detach" },
+    };
+    connection.transport.send(cancel as import("@modelcontextprotocol/client").JSONRPCMessage).catch(() => {
+      // Best-effort cleanup.
+    });
   }
 
   /**
