@@ -9,6 +9,7 @@ import type { UiServerHandle } from "./ui-server.ts";
 import type { McpRuntimeOwner } from "./runtime-owner.ts";
 import type { McpOAuthRuntime } from "./mcp-auth-flow.ts";
 import type { McpStatusEventBus } from "./mcp-status.ts";
+import type { McpTasksManager } from "./mcp-tasks-manager.ts";
 
 export interface CompletedUiSession {
   serverName: string;
@@ -59,4 +60,5 @@ export interface McpExtensionState {
   sendMessage?: SendMessageFn;
   onToolMetadataUpdated?: (serverName: string, reason: string) => void | Promise<void>;
   statusEvents?: McpStatusEventBus;
+  tasksManager?: McpTasksManager;
 }

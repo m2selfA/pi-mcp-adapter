@@ -21,6 +21,7 @@ import { publishMcpStatusShutdown } from "./mcp-status.ts";
 import { runMcpScript } from "./mcp-code.ts";
 import { cleanupMaterializedBinaryResources } from "./tool-registrar.ts";
 import { installMcpContext } from "./mcp-context.ts";
+import { McpTasksManager } from "./mcp-tasks-manager.ts";
 
 export type { McpAdapterOptions } from "./types.ts";
 export {
@@ -74,6 +75,7 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
   let currentOwner: McpRuntimeOwner | null = null;
   let currentOAuthRuntime: McpOAuthRuntime | null = null;
   let lifecycleGeneration = 0;
+  const tasksManager = new McpTasksManager({ getState: () => state, pi });
 
   async function shutdownState(currentState: McpExtensionState | null, reason: string): Promise<void> {
     if (!currentState) {
@@ -315,6 +317,11 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
       }
 
       state = nextState;
+      nextState.tasksManager = tasksManager;
+      // Attach the tasks interceptor to every already-connected server.
+      for (const name of Object.keys(nextState.config.mcpServers)) {
+        tasksManager.attachServer(name);
+      }
       nextState.onToolMetadataUpdated = (_serverName, _reason) => {
         if (state !== nextState || !owner.isActive()) return;
         syncPromptCommands();
@@ -431,6 +438,7 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
     // Abort before awaiting cleanup so delayed initialization cannot touch stale
     // Pi context after session shutdown.
     const stopOwner = owner?.stop("MCP extension session shutdown") ?? Promise.resolve();
+    tasksManager.shutdown();
     try {
       await Promise.all([
         stopOwner,

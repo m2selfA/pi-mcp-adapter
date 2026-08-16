@@ -1225,20 +1225,43 @@ export async function executeCall(
         })
       : null;
 
-    const result = await withSessionRecovery<ClientCallToolResult>(
-      {
-        manager: state.manager,
-        config: state.config,
-        ...(ownedSignal ? { signal: ownedSignal } : {}),
-        onNeedsAuth: recoverAuthConnection,
-      },
-      serverName,
-      (conn) => abortable(conn.client.callTool({
-        name: toolMeta.originalName,
-        arguments: args ?? {},
-        _meta: uiSession?.requestMeta,
-      }, requestOptions), ownedSignal),
-    );
+    // Register a one-shot capture for a possible CreateTaskResult before
+    // calling the tool. If the server returns resultType: "task", the SDK's
+    // callTool rejects with UnsupportedResultType, but our transport
+    // interceptor captures the raw CreateTaskResult first.
+    let capturedTask: import("./mcp-tasks-wire.ts").CreateTaskResult | undefined;
+    state.tasksManager?.captureNextCreateTask(serverName, (task) => { capturedTask = task; });
+
+    let result: ClientCallToolResult;
+    try {
+      result = await withSessionRecovery<ClientCallToolResult>(
+        {
+          manager: state.manager,
+          config: state.config,
+          ...(ownedSignal ? { signal: ownedSignal } : {}),
+          onNeedsAuth: recoverAuthConnection,
+        },
+        serverName,
+        (conn) => abortable(conn.client.callTool({
+          name: toolMeta.originalName,
+          arguments: args ?? {},
+          _meta: uiSession?.requestMeta,
+        }, requestOptions), ownedSignal),
+      );
+    } catch (taskError) {
+      // If the server returned a task handle, the SDK rejects with
+      // UnsupportedResultType. Our interceptor already captured the
+      // CreateTaskResult — hand it to the task manager and return the
+      // handle text to the agent immediately (non-blocking).
+      if (capturedTask && state.tasksManager) {
+        const handleText = state.tasksManager.trackTask(serverName, capturedTask, toolMeta.originalName);
+        return {
+          content: [{ type: "text" as const, text: handleText }],
+          details: { mode: "call", ...callIdentity, task: { taskId: capturedTask.taskId, status: capturedTask.status, server: serverName } },
+        };
+      }
+      throw taskError;
+    }
 
     if (toolMeta.uiResourceUri) {
       uiSession?.sendToolResult(result as unknown as import("@modelcontextprotocol/client").CallToolResult);

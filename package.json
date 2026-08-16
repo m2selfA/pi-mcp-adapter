@@ -103,6 +103,8 @@
     "mcp-probe.ts",
     "mcp-context.ts",
     "mcp-context-lib.ts",
+    "mcp-tasks-wire.ts",
+    "mcp-tasks-manager.ts",
     "agent-plugin-loader.ts",
     "resource-tools.ts",
     "lifecycle.ts",
