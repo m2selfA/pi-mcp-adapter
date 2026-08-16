@@ -149,9 +149,70 @@ export function installTaskMessageInterceptor(
   };
 }
 
+type OnMessageFn = (message: JSONRPCMessage, extra?: unknown) => void;
+
+interface ResponseDispatcher {
+  pending: Map<number | string, (message: JSONRPCMessage) => void>;
+}
+
+interface DispatcherEntry extends ResponseDispatcher {
+  handler: OnMessageFn | undefined;
+  savedOnMessage: OnMessageFn | undefined;
+  detached: boolean;
+}
+
+const dispatcherMap = new WeakMap<Transport, DispatcherEntry>();
+
+/**
+ * Install a persistent onmessage chain on the transport that dispatches
+ * JSON-RPC responses to pending sendTaskRequest callers by id. Unlike the
+ * old approach (replace onmessage per request), this dispatcher is installed
+ * once and shared by all concurrent tasks requests — no clobbering.
+ *
+ * The dispatcher forwards ALL messages to the SDK handler (savedOnMessage),
+ * so it is transparent to the SDK and to installTaskMessageInterceptor.
+ */
+function ensureResponseDispatcher(transport: Transport): ResponseDispatcher {
+  let entry = dispatcherMap.get(transport);
+  if (entry) return entry;
+
+  const e: DispatcherEntry = {
+    pending: new Map(),
+    handler: undefined,
+    savedOnMessage: transport.onmessage as OnMessageFn | undefined,
+    detached: false,
+  };
+
+  e.handler = ((message: JSONRPCMessage, extra?: unknown): void => {
+    // Dispatch to matching pending request.
+    if (isJSONRPCResponse(message)) {
+      const id = (message as { id?: number | string }).id;
+      if (id !== undefined) {
+        const resolver = e.pending.get(id);
+        if (resolver) {
+          resolver(message);
+        }
+      }
+    }
+    // Forward to the SDK handler (or interceptor chain).
+    if (typeof e.savedOnMessage === "function") {
+      e.savedOnMessage(message, extra);
+    }
+  }) as OnMessageFn;
+
+  transport.onmessage = e.handler as Transport["onmessage"];
+  dispatcherMap.set(transport, e);
+  return e;
+}
+
 /**
  * Send a raw JSON-RPC request over the transport and wait for the matching
  * response by id. Bypasses the SDK's era gate and decodeResult entirely.
+ *
+ * Uses a shared response dispatcher on the transport (one onmessage chain
+ * for all pending tasks requests) so concurrent calls don't clobber each
+ * other's onmessage handler. The dispatcher matches responses by id, resolves
+ * the matching pending request, and forwards ALL messages to the SDK handler.
  *
  * The caller is responsible for building a complete _meta envelope if the
  * request needs one (use buildTasksDeclarationMeta + envelope helpers).
@@ -170,33 +231,29 @@ export async function sendTaskRequest<T = unknown>(
     params,
   } as JSONRPCMessage;
 
+  const dispatcher = ensureResponseDispatcher(transport);
+
   return new Promise((resolve) => {
     const timeoutMs = options.timeoutMs ?? 30_000;
     let settled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
 
-    // Temporarily chain onmessage to intercept the response by id.
-    const savedOnMessage = transport.onmessage;
     const cleanup = () => {
       settled = true;
       if (timer) clearTimeout(timer);
-      if (transport.onmessage === responseHandler) {
-        transport.onmessage = savedOnMessage;
-      }
+      dispatcher.pending.delete(id);
     };
 
-    const responseHandler = (message: JSONRPCMessage): void => {
+    dispatcher.pending.set(id, (message: JSONRPCMessage) => {
       if (settled) return;
-      if (!isJSONRPCResponse(message) || message.id !== id) return;
       cleanup();
       if ("error" in message && message.error) {
         resolve({ ok: false, error: message.error as { code: number | string; message: string; data?: unknown } });
       } else {
         resolve({ ok: true, result: (message as { result: unknown }).result as T });
       }
-    };
+    });
 
-    transport.onmessage = responseHandler;
     options.signal?.addEventListener("abort", () => {
       if (settled) return;
       cleanup();

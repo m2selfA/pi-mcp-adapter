@@ -350,6 +350,7 @@ When any enabled server uses `eager` or `keep-alive`, initialization also starts
 | `sampling` | Allow MCP servers to sample through Pi models, honoring `modelPreferences.hints` before current/default fallback (default: true when UI approval is available). |
 | `samplingAutoApprove` | Skip sampling confirmation prompts. Required for sampling in non-UI sessions (default: false). |
 | `elicitation` | Allow MCP servers to request user input through Pi dialogs (default: true when Pi UI is available). |
+| `tasksExtension` | Enable the MCP Tasks extension (SEP-2663) — non-blocking background tasks, polling, subscriptions/listen, and agent wake-up on completion. Default: true. Set to false to disable all task machinery. |
 | `outputGuard` | Guard oversized MCP output: `true` (default), `false`, or `{ maxBytes, maxLines, detailsMaxBytes }`. See [Output Guard](#output-guard). |
 | `trace` | Opt-in metadata-only protocol tracing. Set `{ enabled: true }` globally or `trace: true` on a server. The per-session JSONL file defaults to `.pi/mcp-traces/`; `file`, `maxBytes` (default 262144), and `maxEvents` (default 10000) can be set. Raw MCP payloads, prompts, tool arguments/results, auth data, and URLs are never persisted. |
 
@@ -460,6 +461,47 @@ MCP servers can advertise prompt templates alongside tools and resources. The ad
 ```
 
 Prompt results are flattened into one user message, preserving `[user]` and `[assistant]` role markers for multi-message results. Servers without the `prompts` capability are not probed.
+
+### MCP Tasks (SEP-2663)
+
+The adapter implements the `io.modelcontextprotocol/tasks` extension (SEP-2663) for long-running, server-directed background tasks. The official `@modelcontextprotocol/client` 2.0.0 does not implement this extension — it treats `tasks/*` as deprecated 2025-11-25 wire vocabulary with no runtime. The adapter bypasses the SDK funnel entirely and speaks raw JSON-RPC over the transport.
+
+**How it works:**
+
+1. The adapter declares `io.modelcontextprotocol/tasks` eligibility on every `tools/call` (rebuilt from the adapter's existing client capabilities so sampling/elicitation are not clobbered).
+2. If a server returns `resultType: "task"`, the adapter returns a **non-blocking task handle** to the agent immediately — the agent's turn ends and it can continue other work.
+3. A background manager polls `tasks/get` at the server-suggested `pollIntervalMs`.
+4. A task-filtered `subscriptions/listen` is opened per server so `notifications/tasks` pushes update task state without an extra round-trip (polling remains the fallback).
+5. `input_required` tasks bridge through the adapter's existing elicitation and sampling handlers, submitting responses via `tasks/update`.
+6. When the task reaches a terminal state (`completed` / `failed` / `cancelled`), the agent is woken via `pi.sendMessage({ triggerTurn: true })` with the final result.
+
+Task IDs are persisted to `mcp-tasks.json` in the Pi agent directory. If Pi restarts while a task is still running, polling resumes automatically on the next `attachServer`.
+
+Disable the tasks machinery with:
+
+```json
+{
+  "settings": {
+    "tasksExtension": false
+  }
+}
+```
+
+Tasks require a `2026-07-28`-era connection (`protocolVersion: "auto"` or `"2026-07-28"`). On a legacy connection, servers never return tasks and calls run synchronously.
+
+### MCP Context Mentions
+
+The adapter now includes the former `pi-mcp-context` companion package as a first-party module. `#server` mentions, `/mcp:<server>` slash commands, and `#` / `:` TUI autocomplete work out of the box — no second package needed.
+
+| Form | Expansion |
+|------|----------|
+| `#server` | `use <server> mcp;` — lightweight prompt hint, no metadata dump |
+| `#server -t` / `--tools` | `use <server> mcp, with <tool0>, <tool1>, ...;` — adds tool names |
+| `#server -f` / `--full` / `--schemas` | Full `<mcp-context>` catalog (names, descriptions, resources, prompts, schemas) |
+| `/mcp:<server>` | Full catalog placed in the editor for review before submission |
+| `/mcp:select` | Opens a server picker when a TUI is available |
+
+The catalog is built from live adapter state (tool/prompt metadata, connection resources, server instructions) with fallback to the persisted `mcp-cache.json` for cached-only servers.
 
 ### MCP Elicitation
 
