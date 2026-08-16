@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **MCP Tasks extension (SEP-2663, `io.modelcontextprotocol/tasks`)**: the adapter now drives server-directed long-running tasks end to end. When a server returns `resultType: "task"` from a `tools/call`, the adapter returns a non-blocking task handle to the agent immediately, polls `tasks/get` in the background at the server-suggested interval, handles `input_required` via the existing elicitation bridge + `tasks/update`, and wakes the agent with the final result via `pi.sendMessage({ triggerTurn: true })` when the task reaches a terminal state. A task-filtered `subscriptions/listen` is opened per server so `notifications/tasks` pushes update task state without an extra round-trip (polling remains the fallback). The implementation bypasses the SDK 2.0.0 request funnel entirely (the SDK treats `tasks/*` as deprecated 2025-11-25 vocabulary with no runtime and rejects `resultType: "task"` with `UnsupportedResultType`) by speaking raw JSON-RPC over the transport and chaining a `transport.onmessage` interceptor — the same wrap pattern `mcp-trace.ts` uses. The per-request tasks declaration is rebuilt from the adapter's existing client capabilities (sampling/elicitation) so it does not clobber them.
+- **Inlined pi-mcp-context companion**: `#server` mention expansion (`use <server> mcp;` / `-t` tool names / `-f` `--full` full catalog), `/mcp:<server>` and `/mcp:select` slash commands, and `#` / `:` TUI autocomplete now work out of the box once the adapter is installed — no second package needed. The catalog is built from live adapter state (tool/prompt metadata, connection resources, server instructions) with fallback to the persisted `mcp-cache.json`.
+
 ### Fixed
 - Recovered MCP gateway requests nested inside proxy `args` instead of silently showing status, and now rejects invalid nested gateway requests with guidance. Thanks to [@ibrmora](https://github.com/ibrmora) for #363.
 
