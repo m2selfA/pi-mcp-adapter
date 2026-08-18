@@ -9,8 +9,6 @@ import {
   renderServerUse,
   renderServerUseWithTools,
   resolveServerReference,
-  resolveDirectToolMode,
-  listDirectToolNames,
 } from "../mcp-context-lib.ts";
 
 describe("mcp-context-lib", () => {
@@ -115,11 +113,7 @@ describe("mcp-context-lib", () => {
     const hint = renderServerUse("github", { name: "github", status: "cached", toolCount: 4, disabled: false });
 
     expect(hint).toMatch(/^<use-mcp server="github" status="cached">/);
-    // D: no longer emits the pseudo-statement `use github mcp;`.
-    expect(hint).not.toMatch(/use github mcp;/);
-    // B: never emit the invalid `mcp({ server })` form.
-    expect(hint).toContain('mcp({ search: "", server: "github", limit: 12 })');
-    expect(hint).toContain('mcp({ tool: "<name>", args: {...}, server: "github" })');
+    expect(hint).toMatch(/use github mcp;/);
     expect(hint).not.toMatch(/<tools>/);
   });
 
@@ -131,13 +125,13 @@ describe("mcp-context-lib", () => {
     );
 
     expect(hint).toMatch(/^<use-mcp server="github" status="cached">/);
-    expect(hint).toContain("Known tools: a, b, c");
+    expect(hint.includes("use github mcp, with a, b, c;")).toBe(true);
     expect(hint).not.toMatch(/<tools>/);
   });
 
   it("renders transition state gracefully when no tools are cached", () => {
     const hint = renderServerUseWithTools("github", undefined, undefined);
-    expect(hint).toMatch(/Known tools: \(no cached tool names; discover via the mcp proxy\)/);
+    expect(hint).toMatch(/with \(no cached tool names; discover via the mcp proxy\);/);
   });
 
   it("leaves the existing @ syntax untouched", () => {
@@ -184,98 +178,5 @@ describe("mcp-context-lib", () => {
       prompt: "find open issues",
     });
     expect(buildEditorText("<ctx/>", "find open issues")).toBe("<ctx/>\n\nfind open issues");
-  });
-
-  // --- A: directTools servers render a direct-call hint, not a proxy pointer ---
-
-  it("detects directTools mode from definition.directTools=true", () => {
-    const mode = resolveDirectToolMode(
-      "ctx",
-      { command: "x", directTools: true },
-      { mcpServers: { ctx: { command: "x", directTools: true } } },
-      undefined,
-    );
-    expect(mode).toEqual({ direct: true, tools: true });
-  });
-
-  it("detects directTools mode from global settings.directTools", () => {
-    const mode = resolveDirectToolMode(
-      "ctx",
-      { command: "x" },
-      { mcpServers: { ctx: { command: "x" } }, settings: { directTools: true } },
-      undefined,
-    );
-    expect(mode.direct).toBe(true);
-  });
-
-  it("treats definition.directTools=false as non-direct even when global is true", () => {
-    const mode = resolveDirectToolMode(
-      "ctx",
-      { command: "x", directTools: false },
-      { mcpServers: { ctx: { command: "x", directTools: false } }, settings: { directTools: true } },
-      undefined,
-    );
-    expect(mode.direct).toBe(false);
-  });
-
-  it("treats an env override as exclusive: non-listed servers are non-direct", () => {
-    const override = new Map<string, true | string[]>([["only", true]]);
-    const mode = resolveDirectToolMode(
-      "other",
-      { command: "x", directTools: true },
-      { mcpServers: { other: { command: "x", directTools: true } }, settings: { directTools: true } },
-      override,
-    );
-    expect(mode.direct).toBe(false);
-  });
-
-  it("renders a direct-tools hint for a directTools server (A + E)", () => {
-    const config = { mcpServers: { ctx: { command: "x", directTools: true } }, settings: { toolPrefix: "server" } };
-    const hint = renderServerUse(
-      "ctx",
-      { name: "ctx", status: "connected", toolCount: 2, disabled: false },
-      { entry: { tools: [{ name: "grok_search" }, { name: "grok_deep" }] }, config },
-    );
-    expect(hint).toMatch(/^<direct-tools server="ctx" status="connected">/);
-    expect(hint).toContain("direct top-level Pi tools");
-    expect(hint).toContain("ctx_grok_search, ctx_grok_deep");
-    expect(hint).toContain("tool prefix: ctx_");
-    expect(hint).not.toMatch(/prefer.*mcp proxy/);
-  });
-
-  it("lists prefixed direct tool names using the configured prefix (E)", () => {
-    const { names } = listDirectToolNames(
-      "ctx",
-      { tools: [{ name: "a" }, { name: "b" }] },
-      { mcpServers: { ctx: {} }, settings: { toolPrefix: "none" } },
-    );
-    expect(names).toEqual(["a", "b"]);
-  });
-
-  // --- C: small proxy servers default to the with-tools form ---
-
-  it("defaults small proxy servers to the with-tools form (C)", () => {
-    const hint = renderServerUse(
-      "small",
-      { name: "small", status: "cached", toolCount: 3, disabled: false },
-      { entry: { tools: [{ name: "a" }, { name: "b" }, { name: "c" }] } },
-    );
-    expect(hint).toMatch(/^<use-mcp server="small" status="cached">/);
-    expect(hint).toContain("Known tools: a, b, c");
-  });
-
-  it("renders the compact proxy hint for large servers (B + D)", () => {
-    const many = Array.from({ length: 10 }, (_, i) => ({ name: `t${i}` }));
-    const hint = renderServerUse(
-      "big",
-      { name: "big", status: "cached", toolCount: 10, disabled: false },
-      { entry: { tools: many } },
-    );
-    expect(hint).toMatch(/^<use-mcp server="big" status="cached">/);
-    // D: no pseudo-statement.
-    expect(hint).not.toMatch(/use big mcp;/);
-    // B: legal discovery example, not `mcp({ server })`.
-    expect(hint).toContain('mcp({ search: "", server: "big", limit: 12 })');
-    expect(hint).not.toMatch(/mcp\(\{ server: "big" \}\)/);
   });
 });

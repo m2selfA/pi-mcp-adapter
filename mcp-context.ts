@@ -8,7 +8,7 @@
 // rather than reading the cache file independently.
 
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { MCP_STATUS_EVENT, type McpConfig, type McpServerStatusSnapshot, type McpStatusSnapshot } from "./types.ts";
+import { MCP_STATUS_EVENT, type McpServerStatusSnapshot, type McpStatusSnapshot } from "./types.ts";
 import {
   buildEditorText,
   createServerIndex,
@@ -30,10 +30,6 @@ const SELECT_COMMAND = "mcp:select";
 export interface McpContextOptions {
   /** Live catalog of cached server metadata. May be null before init. */
   getCatalog: () => McpContextCatalog | null;
-  /** Effective MCP config, used to detect directTools servers and tool prefixes. */
-  getConfig?: () => McpConfig | undefined;
-  /** Per-server direct-tool override (e.g. from MCP_DIRECT_TOOLS env). */
-  getDirectToolOverride?: () => Map<string, true | string[]> | undefined;
 }
 
 export function installMcpContext(pi: ExtensionAPI, options: McpContextOptions): void {
@@ -225,11 +221,9 @@ export function installMcpContext(pi: ExtensionAPI, options: McpContextOptions):
     notify(ctx, `Prepared MCP context for ${serverName}. Review it in the editor and submit.`, "info");
   }
 
-  // `#server` expands adaptively: direct-tools servers render a
-  // `<direct-tools>` block (A); small proxy servers render `Known tools:`
-  // (C); large proxy servers render a compact `<use-mcp>` hint with a legal
-  // discovery example (B/D); `-t`/`--tools` forces the `Known tools:` form;
-  // and `-f`/`--full`/`--schemas` forces the full <mcp-context> catalog.
+  // `#server` expands to a plain-text `use <server> mcp;` hint by default, to
+  // a `use <server> mcp, with <tools>;` form with `-t`/`--tools`, and to the
+  // full <mcp-context> catalog with `-f`/`--full`/`--schemas`.
   // The `/mcp:<server>` slash form always expands to the full catalog.
   function renderMention(
     serverName: string,
@@ -243,12 +237,7 @@ export function installMcpContext(pi: ExtensionAPI, options: McpContextOptions):
 
   function renderUse(serverName: string): string {
     const status = statuses.get(serverName);
-    const catalog = options.getCatalog();
-    return renderServerUse(serverName, status, {
-      entry: catalog?.servers[serverName],
-      config: catalog?.config ?? options.getConfig?.(),
-      directToolOverride: catalog?.directToolOverride ?? options.getDirectToolOverride?.(),
-    });
+    return renderServerUse(serverName, status);
   }
 
   function renderUseWithTools(serverName: string): string {
@@ -307,8 +296,6 @@ export {
   resolveServerReference,
   buildEditorText,
   escapeXml,
-  resolveDirectToolMode,
-  listDirectToolNames,
 } from "./mcp-context-lib.ts";
 
 export type {
