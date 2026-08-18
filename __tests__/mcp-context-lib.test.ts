@@ -9,6 +9,7 @@ import {
   renderServerUse,
   renderServerUseWithTools,
   resolveServerReference,
+  splitMentionBlocks,
 } from "../mcp-context-lib.ts";
 
 describe("mcp-context-lib", () => {
@@ -178,5 +179,23 @@ describe("mcp-context-lib", () => {
       prompt: "find open issues",
     });
     expect(buildEditorText("<ctx/>", "find open issues")).toBe("<ctx/>\n\nfind open issues");
+  });
+
+  it("splitMentionBlocks separates <use-mcp> blocks from the prompt", () => {
+    const expanded =
+      `<use-mcp server="github" status="connected">\n` +
+      `use github mcp;\n` +
+      `</use-mcp>`;
+    const { blocks, prompt } = splitMentionBlocks(`${expanded}\n\nfind open issues`);
+    expect(blocks).toBe(expanded);
+    expect(prompt).toBe("find open issues");
+  });
+
+  it("splitMentionBlocks handles a mention with no prompt", () => {
+    const expanded =
+      `<use-mcp server="github" status="connected">\nuse github mcp;\n</use-mcp>`;
+    const { blocks, prompt } = splitMentionBlocks(expanded);
+    expect(blocks).toBe(expanded);
+    expect(prompt).toBe("");
   });
 });

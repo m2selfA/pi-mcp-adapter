@@ -270,6 +270,29 @@ export function buildEditorText(context: string, prompt: string): string {
   return prompt.trim().length > 0 ? `${context}\n\n${prompt.trim()}` : context;
 }
 
+/**
+ * Split expanded mention text into the `<use-mcp>` (or `<mcp-context>`) block
+ * portion and the remaining user prompt text. Used by the `#mention`
+ * CustomMessage renderer so the block can be collapsed and the prompt shown
+ * separately. Blocks are kept verbatim and concatenated; everything else is
+ * trimmed and collapsed into the prompt string.
+ */
+export function splitMentionBlocks(expandedText: string): { blocks: string; prompt: string } {
+  const blocks: string[] = [];
+  const rest: string[] = [];
+  const pattern = /<(?:use-mcp|mcp-context)\b[\s\S]*?<\/(?:use-mcp|mcp-context)>/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(expandedText)) !== null) {
+    if (match.index > lastIndex) rest.push(expandedText.slice(lastIndex, match.index));
+    blocks.push(match[0]);
+    lastIndex = match.index + match[0].length;
+  }
+  if (lastIndex < expandedText.length) rest.push(expandedText.slice(lastIndex));
+  const prompt = rest.join("").replace(/[\u00A0\s]+/g, " ").trim();
+  return { blocks: blocks.join("\n"), prompt };
+}
+
 export function escapeXml(value: string): string {
   return value
     .replace(/&/g, "&amp;")

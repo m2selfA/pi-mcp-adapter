@@ -9,6 +9,7 @@
 
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { MCP_STATUS_EVENT, type McpServerStatusSnapshot, type McpStatusSnapshot } from "./types.ts";
+import { renderMcpMention, type McpMentionDetails } from "./mcp-mention-renderer.ts";
 import {
   buildEditorText,
   createServerIndex,
@@ -19,6 +20,7 @@ import {
   renderServerUse,
   renderServerUseWithTools,
   resolveServerReference,
+  splitMentionBlocks,
   type AutocompleteItem,
   type McpContextCatalog,
   type MentionRenderOptions,
@@ -26,6 +28,7 @@ import {
 } from "./mcp-context-lib.ts";
 
 const SELECT_COMMAND = "mcp:select";
+const MENTION_MESSAGE_TYPE = "mcp-mention";
 
 export interface McpContextOptions {
   /** Live catalog of cached server metadata. May be null before init. */
@@ -106,7 +109,24 @@ export function installMcpContext(pi: ExtensionAPI, options: McpContextOptions):
       const expanded = expandServerMentions(event.text, index, (serverName, opts) =>
         renderMention(serverName, opts, renderContext)
       );
-      if (expanded.changed) return { action: "transform" as const, text: expanded.text };
+      if (expanded.changed && expanded.servers.length > 0) {
+        // `#server prompt` → send a collapsible CustomMessage whose content
+        // (block + "\n\n" + prompt) is what the LLM sees as one user message,
+        // mirroring the pre-mention transform. The renderer splits the block
+        // from the prompt for display and folds on ctrl+o.
+        const { blocks, prompt } = splitMentionBlocks(expanded.text);
+        const details: McpMentionDetails = {
+          serverName: expanded.servers.join(", "),
+          blockText: blocks,
+          prompt,
+        };
+        const content = prompt.length > 0 ? `${blocks}\n\n${prompt}` : blocks;
+        void pi.sendMessage(
+          { customType: MENTION_MESSAGE_TYPE, content, display: true, details },
+          { triggerTurn: true },
+        );
+        return { action: "handled" as const };
+      }
     }
 
     // Race-safe fallback for a slash command typed before the adapter's first
@@ -121,6 +141,8 @@ export function installMcpContext(pi: ExtensionAPI, options: McpContextOptions):
       text: buildEditorText(renderContext(serverName, parsed.includeSchemas), parsed.prompt),
     };
   });
+
+  pi.registerMessageRenderer(MENTION_MESSAGE_TYPE, renderMcpMention);
 
   refreshInventory();
 
