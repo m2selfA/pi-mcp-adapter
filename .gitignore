@@ -4,6 +4,21 @@ conformance/results/
 *.log
 .DS_Store
 
+# Build / typecheck artifacts
+dist/
+coverage/
+*.tsbuildinfo
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+desktop.ini
+
 progress.md
 worker-summary.md
 worker-*.md

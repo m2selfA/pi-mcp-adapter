@@ -495,8 +495,8 @@ The adapter now includes the former `pi-mcp-context` companion package as a firs
 
 | Form | Expansion |
 |------|----------|
-| `#server` | `use <server> mcp;` — lightweight prompt hint, no metadata dump |
-| `#server -t` / `--tools` | `use <server> mcp, with <tool0>, <tool1>, ...;` — adds tool names |
+| `#server` | Adaptive: for direct-tools servers, a `<direct-tools>` hint listing prefixed names + the tool prefix (call directly); for small proxy servers (≤6 tools), the `Known tools:` form; otherwise a compact `<use-mcp>` hint with a *legal* discovery call. No metadata dump. |
+| `#server -t` / `--tools` | `Known tools: <tool0>, <tool1>, ...` — lists tool names for precise calls |
 | `#server -f` / `--full` / `--schemas` | Full `<mcp-context>` catalog (names, descriptions, resources, prompts, schemas) |
 | `/mcp:<server>` | Full catalog placed in the editor for review before submission |
 | `/mcp:select` | Opens a server picker when a TUI is available |

@@ -7,6 +7,8 @@
 // runtime dependency. The extension wiring lives in mcp-context.ts.
 
 import type { CachedPrompt, CachedResource, CachedTool, ServerCacheEntry } from "./types.ts";
+import { formatToolName, resolveToolPrefix } from "./types.ts";
+import type { McpConfig, ServerEntry, ToolPrefix } from "./types.ts";
 
 export type { CachedPrompt, CachedResource, CachedTool, ServerCacheEntry } from "./types.ts";
 
@@ -14,6 +16,10 @@ export type { CachedPrompt, CachedResource, CachedTool, ServerCacheEntry } from 
 export interface McpContextCatalog {
   version?: number;
   servers: Record<string, ServerCacheEntry>;
+  /** Effective MCP config (used to detect directTools servers and tool prefixes). Optional. */
+  config?: McpConfig | undefined;
+  /** Per-server direct tool override (e.g. from MCP_DIRECT_TOOLS env). Optional. */
+  directToolOverride?: Map<string, true | string[]> | undefined;
 }
 
 export interface AdapterServerStatus {
@@ -56,6 +62,10 @@ export interface MentionRenderOptions {
 const DEFAULT_MAX_CHARS = 12_000;
 const SAFE_ALIAS_CHARACTER = /[A-Za-z0-9._-]/;
 const MAX_TOOL_NAMES = 40;
+/** Below this cached tool count, `#srv` defaults to the with-tools form (C: auto-tier). */
+const SMALL_SERVER_TOOL_THRESHOLD = 6;
+/** Max direct-tool names listed verbatim in a directTools server hint (E: prefix hint). */
+const MAX_DIRECT_TOOL_NAMES = 12;
 // Matches #server plus any trailing -t / --tools (transition) or
 // -f / --full / --schema(s) (full catalog) modifiers.
 const SERVER_MENTION_PATTERN = /(^|[\s])#([A-Za-z0-9._-]+)((?:\s+(?:-t|--tools|-f|--full|--schema|--schemas))*)(?![A-Za-z0-9._-])/g;
@@ -107,21 +117,102 @@ export function resolveServerReference(index: ServerIndex, reference: string): s
 }
 
 /**
- * Renders a lightweight `use <server> mcp;` hint — a pure prompt, not a
- * metadata dump. The model is pointed at this server and at the mcp proxy so
- * it can discover and call tools on demand without paying for the full cached
- * catalog up front.
+ * Resolves whether a server exposes its tools as direct (top-level) Pi tools
+ * rather than only through the `mcp` proxy. Mirrors the adapter's
+ * `resolveDirectTools` selection rules (env override > definition.directTools
+ * > global directTools) without re-implementing the full candidate filtering.
+ *
+ * When `override` is present it is exclusive: only servers it lists get direct
+ * tools, and every other server resolves to `{ direct: false }` regardless of
+ * config (this matches `resolveDirectTools`, which `continue`s past non-listed
+ * servers when an env selection is active).
  */
-export function renderServerUse(serverName: string, status?: AdapterServerStatus | undefined): string {
+export function resolveDirectToolMode(
+  serverName: string,
+  definition: ServerEntry | undefined,
+  config: McpConfig | undefined,
+  override: Map<string, true | string[]> | undefined,
+): { direct: true; tools: string[] | true } | { direct: false } {
+  if (override) {
+    if (!override.has(serverName)) return { direct: false };
+    const value = override.get(serverName);
+    return value === undefined
+      ? { direct: false }
+      : { direct: true, tools: value };
+  }
+  const def = definition;
+  if (def?.directTools !== undefined) {
+    return def.directTools === false
+      ? { direct: false }
+      : { direct: true, tools: def.directTools };
+  }
+  const global = config?.settings?.directTools;
+  if (global !== undefined) {
+    return global === false
+      ? { direct: false }
+      : { direct: true, tools: global };
+  }
+  return { direct: false };
+}
+
+/**
+ * Lists the prefixed names a directTools server exposes, applying the
+ * adapter's tool prefix so the names match what the model must call.
+ * Returns the prefixed names (and a flag whether the list is complete).
+ */
+export function listDirectToolNames(
+  serverName: string,
+  entry: ServerCacheEntry | undefined,
+  config: McpConfig | undefined,
+): { names: string[]; truncated: boolean } {
+  const prefixMode: ToolPrefix = config?.settings?.toolPrefix ?? "server";
+  const effectivePrefix = resolveToolPrefix(config?.mcpServers?.[serverName], prefixMode);
+  const all = (entry?.tools ?? []).map((tool) => formatToolName(tool.name, serverName, effectivePrefix)).filter(Boolean);
+  if (all.length <= MAX_DIRECT_TOOL_NAMES) return { names: all, truncated: false };
+  return { names: all.slice(0, MAX_DIRECT_TOOL_NAMES), truncated: true };
+}
+
+/**
+ * Renders a lightweight server hint. The shape depends on how the server's
+ * tools reach the model:
+ *
+ *  - directTools server → a `<direct-tools>` block listing prefixed names and
+ *    the prefix to guess, telling the model to call them directly (A).
+ *  - small proxy server (≤ SMALL_SERVER_TOOL_THRESHOLD cached tools) → the
+ *    `with <tools>` transition state, so the model targets calls precisely
+ *    without an extra discovery round-trip (C: auto-tier).
+ *  - large proxy server → a compact `use <srv> mcp;` label plus a *legal*
+ *    discovery example call (B), never the invalid `mcp({ server })` form.
+ *
+ * `use <srv> mcp;` is kept only as a human-readable label inside the wrapper,
+ * never as something the model is asked to emit (D: label, not statement).
+ */
+export function renderServerUse(
+  serverName: string,
+  status: AdapterServerStatus | undefined,
+  options: { entry?: ServerCacheEntry | undefined; config?: McpConfig | undefined; directToolOverride?: Map<string, true | string[]> | undefined } = {},
+): string {
   const serializedServer = JSON.stringify(serverName) ?? "\"\"";
   const state = status?.status ?? "cached";
   const disabled = status?.disabled === true;
+  const { entry, config, directToolOverride } = options;
+
+  const directMode = resolveDirectToolMode(serverName, config?.mcpServers?.[serverName], config, directToolOverride);
+  if (directMode.direct) {
+    return renderDirectToolsHint(serverName, entry, config, status);
+  }
+
+  const cachedToolCount = entry?.tools?.length ?? 0;
+  if (cachedToolCount > 0 && cachedToolCount <= SMALL_SERVER_TOOL_THRESHOLD) {
+    return renderServerUseWithTools(serverName, entry, status);
+  }
+
   const lines: string[] = [
     `<use-mcp server="${escapeXml(serverName)}" status="${escapeXml(state)}">`,
-    `use ${serverName} mcp;`,
-    `Prefer this server's tools through the existing mcp proxy. Discover on demand with`,
-    `  mcp({ server: ${serializedServer} })   or   mcp({ search: "...", server: ${serializedServer} })`,
-    `then call with mcp({ tool: "<name>", args: {...} }).`,
+    `# ${serverName} — prefer this server's tools through the existing mcp proxy.`,
+    `Discover on demand with mcp({ search: "", server: ${serializedServer}, limit: 12 })`,
+    `(lists this server's tool names) or mcp({ search: "query", server: ${serializedServer} }),`,
+    `then call with mcp({ tool: "<name>", args: {...}, server: ${serializedServer} }).`,
   ];
   if (disabled) {
     lines.push("The adapter reports this server as disabled; do not assume its tools are callable.");
@@ -131,14 +222,50 @@ export function renderServerUse(serverName: string, status?: AdapterServerStatus
 }
 
 /**
- * Renders the `-t` transition state: a lightweight `use <srv> mcp, with ...;`
- * listing the server's tool names so the model can target calls precisely
- * without paying for the full catalog (descriptions/schemas).
+ * Renders the directTools hint (A): names + prefix the model should use to call
+ * directly, with no proxy pointer (those tools are not behind the proxy).
+ */
+function renderDirectToolsHint(
+  serverName: string,
+  entry: ServerCacheEntry | undefined,
+  config: McpConfig | undefined,
+  status: AdapterServerStatus | undefined,
+): string {
+  const state = status?.status ?? (entry ? "cached" : "not-connected");
+  const disabled = status?.disabled === true;
+  const { names, truncated } = listDirectToolNames(serverName, entry, config);
+  const prefixMode: ToolPrefix = config?.settings?.toolPrefix ?? "server";
+  const effectivePrefix = resolveToolPrefix(config?.mcpServers?.[serverName], prefixMode);
+  const prefixHint = effectivePrefix === "none"
+    ? "(no server prefix; call tools by their original name)"
+    : `tool prefix: ${formatToolName("", serverName, effectivePrefix).replace(/_$/, "")}_`;
+  const toolList = names.length === 0
+    ? "(no cached tool names yet; discover via the mcp proxy if needed)"
+    : names.join(", ") + (truncated ? `, +${(entry?.tools?.length ?? 0) - names.length} more` : "");
+  const lines: string[] = [
+    `<direct-tools server="${escapeXml(serverName)}" status="${escapeXml(state)}">`,
+    `# ${serverName} exposes its tools as direct top-level Pi tools — call them directly,`,
+    `not through the mcp proxy.`,
+    `Direct calls: ${toolList}`,
+    prefixHint,
+  ];
+  if (disabled) {
+    lines.push("The adapter reports this server as disabled; do not assume its tools are callable.");
+  }
+  lines.push("</direct-tools>");
+  return lines.join("\n");
+}
+
+/**
+ * Renders the `-t` transition state (also used as the default for small proxy
+ * servers — C): lists the server's tool names so the model can target calls
+ * precisely without paying for the full catalog. The example call is always
+ * a legal `mcp({ search, server })` form (B).
  */
 export function renderServerUseWithTools(
   serverName: string,
   entry: ServerCacheEntry | undefined,
-  status?: AdapterServerStatus | undefined,
+  status: AdapterServerStatus | undefined,
 ): string {
   const serializedServer = JSON.stringify(serverName) ?? "\"\"";
   const state = status?.status ?? (entry ? "cached" : "not-connected");
@@ -153,8 +280,10 @@ export function renderServerUseWithTools(
     toolList = shown.join(", ") + tail;
   }
   const lines: string[] = [`<use-mcp server="${escapeXml(serverName)}" status="${escapeXml(state)}">`];
-  lines.push(`use ${serverName} mcp, with ${toolList};`);
-  lines.push(`Call them through the existing mcp proxy — mcp({ server: ${serializedServer} }) or search for full schemas.`);
+  lines.push(`# ${serverName} — prefer this server's tools through the existing mcp proxy.`);
+  lines.push(`Known tools: ${toolList}`);
+  lines.push(`Call with mcp({ tool: "<name>", args: {...}, server: ${serializedServer} }),`);
+  lines.push(`or re-discover with mcp({ search: "", server: ${serializedServer}, limit: 12 }) for full schemas.`);
   if (disabled) {
     lines.push("The adapter reports this server as disabled; do not assume its tools are callable.");
   }
@@ -179,7 +308,7 @@ export function renderServerContext(
     `<mcp-context server="${escapeXml(serverName)}" status="${escapeXml(state)}">`,
     "This is cached metadata for an MCP server managed by pi-mcp-adapter.",
     `When a task matches this server, use the existing mcp proxy with server ${serializedServer}.`,
-    `The metadata may be stale; use mcp({ server: ${serializedServer} }) or mcp({ search: "...", server: ${serializedServer} }) when live details are needed.`,
+    `The metadata may be stale; use mcp({ search: "", server: ${serializedServer}, limit: 12 }) or mcp({ search: "query", server: ${serializedServer} }) when live details are needed.`,
   ];
 
   if (status?.disabled) {

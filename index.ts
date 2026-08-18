@@ -20,7 +20,7 @@ import { createMcpRuntimeOwner, createOwnedUi, isAbortError, combineAbortSignals
 import { publishMcpStatusShutdown } from "./mcp-status.ts";
 import { runMcpScript } from "./mcp-code.ts";
 import { cleanupMaterializedBinaryResources } from "./tool-registrar.ts";
-import { installMcpContext } from "./mcp-context.ts";
+import { installMcpContext, type McpContextCatalog } from "./mcp-context.ts";
 import { McpTasksManager } from "./mcp-tasks-manager.ts";
 import { handleSamplingRequest, type SamplingHandlerOptions } from "./sampling-handler.ts";
 
@@ -127,6 +127,11 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
   const tasksManager = tasksExtensionEnabled ? new McpTasksManager({ getState: () => state, pi }) : null;
   const envRaw = process.env.MCP_DIRECT_TOOLS;
   const envDirectToolOverride = envRaw?.split(",").map(s => s.trim()).filter(Boolean);
+  // Resolved once per effective config/env: a Map<server, true|string[]> mirroring
+  // resolveDirectTools' env-selection semantics (exclusive when present).
+  const directToolOverrideMap = envDirectToolOverride && envDirectToolOverride.length > 0
+    ? buildDirectToolOverrideMap(envDirectToolOverride)
+    : undefined;
   const registeredDirectTools = new Map<string, string>();
   const fallbackDeactivatedTools = new Set<string>();
   const toolRenderOptions = resolveMcpToolRenderOptions(earlyConfig.settings);
@@ -938,7 +943,7 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
   // commands, and # / : autocomplete. The catalog is built from live adapter
   // state (connected servers' tool/prompt metadata) and falls back to the
   // persisted mcp-cache.json for not-yet-connected or cached-only servers.
-  const buildLiveCatalog = (): MetadataCache => {
+  const buildLiveCatalog = (): McpContextCatalog => {
     const fileCache = loadMetadataCache();
     const servers: Record<string, ServerCacheEntry> = {};
     const knownNames = new Set<string>([
@@ -997,12 +1002,42 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
         cachedAt: fileEntry?.cachedAt ?? Date.now(),
       };
     }
-    return { version: 1, servers };
+    return { version: 1, servers, config: state?.config ?? earlyConfig, directToolOverride: directToolOverrideMap };
   };
 
-  installMcpContext(pi, { getCatalog: () => (state ? buildLiveCatalog() : loadMetadataCache()) });
+  installMcpContext(pi, {
+    getCatalog: () => (state ? buildLiveCatalog() : loadMetadataCache()),
+    getConfig: () => state?.config ?? earlyConfig,
+    getDirectToolOverride: () => directToolOverrideMap,
+  });
 
   startLoadTimeInitialization();
+}
+
+/**
+ * Build an exclusive per-server direct-tool override map from MCP_DIRECT_TOOLS
+ * selectors, mirroring `parseDirectToolSelectors`: `server` → `true`, `server/tool`
+ * → `[tool]`. Presence of any selector makes the map exclusive (non-listed
+ * servers resolve to non-direct), matching `resolveDirectTools`.
+ */
+function buildDirectToolOverrideMap(selectors: readonly string[]): Map<string, true | string[]> {
+  const map = new Map<string, true | string[]>();
+  for (let selector of selectors) {
+    selector = selector.replace(/\/+$/, "");
+    if (selector.includes("/")) {
+      const [server, tool] = selector.split("/", 2);
+      if (server && tool) {
+        const existing = map.get(server);
+        if (Array.isArray(existing)) existing.push(tool);
+        else map.set(server, [tool]);
+      } else if (server) {
+        map.set(server, true);
+      }
+    } else if (selector) {
+      map.set(selector, true);
+    }
+  }
+  return map;
 }
 
 export function createMcpAdapter(options: McpAdapterOptions = {}) {
