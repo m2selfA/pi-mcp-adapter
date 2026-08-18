@@ -132,14 +132,29 @@ export function installMcpContext(pi: ExtensionAPI, options: McpContextOptions):
     // Race-safe fallback for a slash command typed before the adapter's first
     // status event registered the dynamic command.
     const match = event.text.match(/^\s*\/mcp:([A-Za-z0-9._-]+)(?:\s+([\s\S]*?))?\s*$/);
-    if (!match) return;
-    const serverName = resolveServerReference(index, match[1]!);
-    if (!serverName) return;
-    const parsed = parseCommandInput(match[2] ?? "");
-    return {
-      action: "transform" as const,
-      text: buildEditorText(renderContext(serverName, parsed.includeSchemas), parsed.prompt),
-    };
+    if (match) {
+      const serverName = resolveServerReference(index, match[1]!);
+      if (serverName) {
+        // `/mcp:server prompt` joins the same collapsible CustomMessage path
+        // as `#server`; the block is the full <mcp-context> catalog. Folded
+        // label is the same [mcp] as #mentions.
+        const parsed = parseCommandInput(match[2] ?? "");
+        const blockText = renderContext(serverName, parsed.includeSchemas);
+        const details: McpMentionDetails = {
+          serverName,
+          blockText,
+          prompt: parsed.prompt,
+        };
+        const content = parsed.prompt.length > 0
+          ? `${blockText}\n\n${parsed.prompt}`
+          : blockText;
+        void pi.sendMessage(
+          { customType: MENTION_MESSAGE_TYPE, content, display: true, details },
+          { triggerTurn: true },
+        );
+        return { action: "handled" as const };
+      }
+    }
   });
 
   pi.registerMessageRenderer(MENTION_MESSAGE_TYPE, renderMcpMention);
