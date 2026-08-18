@@ -201,6 +201,22 @@ export function installMcpContext(pi: ExtensionAPI, options: McpContextOptions):
         return current?.getSuggestions?.(lines, line, col, current) ?? null;
       },
       applyCompletion(lines: string[], line: number, col: number, item: AutocompleteItem, prefix: string) {
+        // `#server` mention: mirror pi's slash-command completion by appending a
+        // trailing space and placing the cursor after it, so typing `#<tab>`
+        // yields `#alias ` ready for the prompt — like `/cmd<tab>`.
+        if (prefix.startsWith("#")) {
+          const currentLine = lines[line] ?? "";
+          const beforePrefix = currentLine.slice(0, col - prefix.length);
+          const afterCursor = currentLine.slice(col);
+          const newLine = `${beforePrefix}${item.value} ${afterCursor}`;
+          const newLines = [...lines];
+          newLines[line] = newLine;
+          return {
+            lines: newLines,
+            cursorLine: line,
+            cursorCol: beforePrefix.length + item.value.length + 1, // +1 for trailing space
+          };
+        }
         return current?.applyCompletion?.(lines, line, col, item, prefix);
       },
       shouldTriggerFileCompletion(lines: string[], line: number, col: number) {
