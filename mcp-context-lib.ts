@@ -114,7 +114,7 @@ export function resolveServerReference(index: ServerIndex, reference: string): s
  * catalog up front and without any XML wrapper noise.
  *
  * Use `#server -t` to list tool names, `#server -f` for the full catalog, or
- * `/mcp:<server>` to place the full catalog in the editor.
+ * `/mcp:<server>` to send the full catalog as a collapsible message.
  */
 export function renderServerUse(
   serverName: string,

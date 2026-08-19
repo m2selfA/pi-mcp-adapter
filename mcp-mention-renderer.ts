@@ -1,13 +1,13 @@
 // mcp-mention-renderer.ts - Collapsible TUI component for `#server` mentions.
 //
 // Mirrors pi's built-in SkillInvocationMessageComponent so a `#server` mention
-// renders as `[mcp] "server" (ctrl+o to expand)` when collapsed and the full
-// `<use-mcp>` block + user prompt when expanded. Pi drives expansion via the
+// renders as `[mcp] "server" (ctrl+o to expand)` when collapsed while keeping
+// the user's prompt visible below the folded block. Pi drives expansion via the
 // global `toolOutputExpanded` toggle (ctrl+o), which CustomMessageComponent
 // forwards to the renderer through `MessageRenderOptions.expanded`.
 
 import { Box, Markdown, Spacer, Text, type Component } from "@earendil-works/pi-tui";
-import { getMarkdownTheme, Theme } from "@earendil-works/pi-coding-agent";
+import { getMarkdownTheme, type Theme } from "@earendil-works/pi-coding-agent";
 
 /** Minimal CustomMessage shape the renderer needs. Keeps us independent of the
  *  internal `CustomMessage` type (not re-exported from the package root). */
@@ -25,16 +25,17 @@ export interface McpMentionDetails {
   serverName: string;
   /** The `<use-mcp>` block text shown when expanded. */
   blockText: string;
-  /** The user's prompt, shown separately when expanded (may be empty). */
+  /** The user's prompt, shown separately from the MCP block (may be empty). */
   prompt: string;
 }
 
 /**
  * Build the component tree for an `mcp-mention` CustomMessage.
  *
- * Collapsed: `[mcp] "server" (ctrl+o to expand)` — one line, no block body.
+ * Collapsed: `[mcp] "server" (ctrl+o to expand)` followed by the user prompt;
+ *            only the MCP block is folded.
  * Expanded:   `[mcp] server` header, the `<use-mcp>` block as markdown, and
- *             the user prompt rendered as a separate text section below it.
+ *             the user prompt rendered as a separate markdown section below it.
  *
  * Returns undefined to fall back to pi's default `[mcp-mention]` box rendering
  * if the message shape is unexpected.
@@ -52,11 +53,23 @@ export function renderMcpMention(
 
   const label = theme.fg("customMessageLabel", `\x1b[1m[mcp]\x1b[22m`);
 
+  const prompt = typeof details.prompt === "string" ? details.prompt.trim() : "";
+  const addPrompt = (): void => {
+    if (!prompt) return;
+    box.addChild(new Spacer(1));
+    box.addChild(new Markdown(prompt, 0, 0, mdTheme, {
+      color: (text) => theme.fg("customMessageText", text),
+    }));
+  };
+
   if (!options.expanded) {
     const line = label +
       theme.fg("customMessageText", ` ${details.serverName}`) +
       theme.fg("dim", ` (ctrl+o to expand)`);
     box.addChild(new Text(line, 0, 0));
+    // Match Pi's skill invocation behavior: the context block folds, but the
+    // original user request remains visible as a separate section.
+    addPrompt();
     return box;
   }
 
@@ -67,9 +80,6 @@ export function renderMcpMention(
     color: (text) => theme.fg("customMessageText", text),
   }));
 
-  if (details.prompt && details.prompt.trim().length > 0) {
-    box.addChild(new Spacer(1));
-    box.addChild(new Text(theme.fg("customMessageText", details.prompt), 0, 0));
-  }
+  addPrompt();
   return box;
 }

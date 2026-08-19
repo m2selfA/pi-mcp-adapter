@@ -7,11 +7,10 @@
 // (live tool/prompt metadata, falling back to the persisted mcp-cache.json)
 // rather than reading the cache file independently.
 
-import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { MCP_STATUS_EVENT, type McpServerStatusSnapshot, type McpStatusSnapshot } from "./types.ts";
 import { renderMcpMention, type McpMentionDetails } from "./mcp-mention-renderer.ts";
 import {
-  buildEditorText,
   createServerIndex,
   expandServerMentions,
   filterServerCompletions,
@@ -62,7 +61,7 @@ export function installMcpContext(pi: ExtensionAPI, options: McpContextOptions):
   subscribeStatus();
 
   pi.registerCommand(SELECT_COMMAND, {
-    description: "Choose an MCP server and prepare its cached context in the editor.",
+    description: "Choose an MCP server and load its cached context as a collapsible message.",
     handler: async (args, ctx) => {
       refreshInventory();
       if (!ctx.hasUI) {
@@ -81,7 +80,7 @@ export function installMcpContext(pi: ExtensionAPI, options: McpContextOptions):
       if (!selected) return;
       const choice = choices.find((candidate) => candidate.label === selected);
       if (!choice) return;
-      await prepareEditor(choice.serverName, args, ctx);
+      sendMentionContext(choice.serverName, args);
     },
   });
 
@@ -113,18 +112,10 @@ export function installMcpContext(pi: ExtensionAPI, options: McpContextOptions):
         // `#server prompt` → send a collapsible CustomMessage whose content
         // (block + "\n\n" + prompt) is what the LLM sees as one user message,
         // mirroring the pre-mention transform. The renderer splits the block
-        // from the prompt for display and folds on ctrl+o.
+        // from the prompt for display, keeps the prompt visible when folded,
+        // and folds the MCP block on ctrl+o.
         const { blocks, prompt } = splitMentionBlocks(expanded.text);
-        const details: McpMentionDetails = {
-          serverName: expanded.servers.join(", "),
-          blockText: blocks,
-          prompt,
-        };
-        const content = prompt.length > 0 ? `${blocks}\n\n${prompt}` : blocks;
-        void pi.sendMessage(
-          { customType: MENTION_MESSAGE_TYPE, content, display: true, details },
-          { triggerTurn: true },
-        );
+        sendMentionMessage(expanded.servers.join(", "), blocks, prompt);
         return { action: "handled" as const };
       }
     }
@@ -139,19 +130,7 @@ export function installMcpContext(pi: ExtensionAPI, options: McpContextOptions):
         // as `#server`; the block is the full <mcp-context> catalog. Folded
         // label is the same [mcp] as #mentions.
         const parsed = parseCommandInput(match[2] ?? "");
-        const blockText = renderContext(serverName, parsed.includeSchemas);
-        const details: McpMentionDetails = {
-          serverName,
-          blockText,
-          prompt: parsed.prompt,
-        };
-        const content = parsed.prompt.length > 0
-          ? `${blockText}\n\n${parsed.prompt}`
-          : blockText;
-        void pi.sendMessage(
-          { customType: MENTION_MESSAGE_TYPE, content, display: true, details },
-          { triggerTurn: true },
-        );
+        sendMentionMessage(serverName, renderContext(serverName, parsed.includeSchemas), parsed.prompt);
         return { action: "handled" as const };
       }
     }
@@ -169,7 +148,7 @@ export function installMcpContext(pi: ExtensionAPI, options: McpContextOptions):
       if (registeredServerCommands.has(commandName)) continue;
       registeredServerCommands.add(commandName);
       pi.registerCommand(commandName, {
-        description: `Prepare cached MCP context for ${serverName}.`,
+        description: `Load cached MCP context for ${serverName} as a collapsible message.`,
         handler: async (args, ctx) => {
           refreshInventory();
           const resolved = index.serverNames.includes(serverName) ? serverName : undefined;
@@ -177,7 +156,7 @@ export function installMcpContext(pi: ExtensionAPI, options: McpContextOptions):
             notify(ctx, `MCP server "${serverName}" is no longer available.`, "warning");
             return;
           }
-          await prepareEditor(resolved, args, ctx);
+          sendMentionContext(resolved, args);
         },
       });
     }
@@ -262,16 +241,25 @@ export function installMcpContext(pi: ExtensionAPI, options: McpContextOptions):
     }));
   }
 
-  async function prepareEditor(serverName: string, args: string, ctx: ExtensionCommandContext): Promise<void> {
+  /** Send the collapsible `mcp-mention` CustomMessage shared by `#server`
+   *  mentions, `/mcp:<server>`, and `/mcp:select`. The content (block +
+   *  "\n\n" + prompt) is what the LLM sees as one user message; the renderer
+   *  folds the MCP block on ctrl+o while keeping the prompt visible. */
+  function sendMentionMessage(serverName: string, blockText: string, prompt: string): void {
+    const content = prompt.length > 0 ? `${blockText}\n\n${prompt}` : blockText;
+    const details: McpMentionDetails = { serverName, blockText, prompt };
+    void pi.sendMessage(
+      { customType: MENTION_MESSAGE_TYPE, content, display: true, details },
+      { triggerTurn: true },
+    );
+  }
+
+  // `/mcp:<server>` and `/mcp:select` send the full cached catalog through the
+  // same collapsible path as `#server` mentions; `--schemas` opts into
+  // including input schemas in the catalog.
+  function sendMentionContext(serverName: string, args: string): void {
     const parsed = parseCommandInput(args);
-    const context = renderContext(serverName, parsed.includeSchemas);
-    const text = buildEditorText(context, parsed.prompt);
-    if (!ctx.hasUI) {
-      pi.sendUserMessage(text);
-      return;
-    }
-    ctx.ui.setEditorText(text);
-    notify(ctx, `Prepared MCP context for ${serverName}. Review it in the editor and submit.`, "info");
+    sendMentionMessage(serverName, renderContext(serverName, parsed.includeSchemas), parsed.prompt);
   }
 
   // `#server` expands to a plain-text `use <server> mcp;` hint by default, to

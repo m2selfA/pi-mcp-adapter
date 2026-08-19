@@ -498,8 +498,8 @@ The adapter now includes the former `pi-mcp-context` companion package as a firs
 | `#server` | `use <server> mcp;` — plain-text hint pointing at the server and the mcp proxy. Simple and effective. |
 | `#server -t` / `--tools` | `use <server> mcp, with <tool0>, <tool1>, ...;` — lists tool names for precise calls |
 | `#server -f` / `--full` / `--schemas` | Full `<mcp-context>` catalog (names, descriptions, resources, prompts, schemas) |
-| `/mcp:<server>` | Full catalog placed in the editor for review before submission |
-| `/mcp:select` | Opens a server picker when a TUI is available |
+| `/mcp:<server>` | Full catalog sent as a collapsible `[mcp]` message (same folding as `#server`); `--schemas` includes input schemas |
+| `/mcp:select` | Opens a server picker when a TUI is available, then sends the same collapsible `[mcp]` message |
 
 The catalog is built from live adapter state (tool/prompt metadata, connection resources, server instructions) with fallback to the persisted `mcp-cache.json` for cached-only servers.
 
