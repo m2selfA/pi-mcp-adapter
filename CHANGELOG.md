@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.28.0] - 2026-08-21
 
 ### Added
 - **MCP Tasks extension (SEP-2663, `io.modelcontextprotocol/tasks`)**: the adapter now drives server-directed long-running tasks end to end. When a server returns `resultType: "task"` from a `tools/call`, the adapter returns a non-blocking task handle to the agent immediately, polls `tasks/get` in the background at the server-suggested interval, handles `input_required` via the existing elicitation bridge + `tasks/update`, and wakes the agent with the final result via `pi.sendMessage({ triggerTurn: true })` when the task reaches a terminal state. A task-filtered `subscriptions/listen` is opened per server so `notifications/tasks` pushes update task state without an extra round-trip (polling remains the fallback). The implementation bypasses the SDK 2.0.0 request funnel entirely (the SDK treats `tasks/*` as deprecated 2025-11-25 vocabulary with no runtime and rejects `resultType: "task"` with `UnsupportedResultType`) by speaking raw JSON-RPC over the transport and chaining a `transport.onmessage` interceptor — the same wrap pattern `mcp-trace.ts` uses. The per-request tasks declaration is rebuilt from the adapter's existing client capabilities (sampling/elicitation) so it does not clobber them.
@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - `#server` mentions now render like Pi's skill invocations: the MCP context block folds behind `[mcp] <server> (ctrl+o to expand)` while the user's prompt stays visible, and `/mcp:<server>` / `/mcp:select` send the same collapsible `[mcp]` message instead of staging the full catalog in the editor for manual submission.
+- The user prompt sent with `#server` / `/mcp:<server>` / `/mcp:select` now renders as a separate user-message box below the folded `[mcp]` block (matching Pi's `/skill:` invocation layout) instead of being inlined inside the block.
 
 ### Fixed
 - Recovered MCP gateway requests nested inside proxy `args` instead of silently showing status, and now rejects invalid nested gateway requests with guidance. Thanks to [@ibrmora](https://github.com/ibrmora) for #363.

@@ -6,7 +6,7 @@
 // global `toolOutputExpanded` toggle (ctrl+o), which CustomMessageComponent
 // forwards to the renderer through `MessageRenderOptions.expanded`.
 
-import { Box, Markdown, Spacer, Text, type Component } from "@earendil-works/pi-tui";
+import { Box, Container, Markdown, Spacer, Text, type Component } from "@earendil-works/pi-tui";
 import { getMarkdownTheme, type Theme } from "@earendil-works/pi-coding-agent";
 
 /** Minimal CustomMessage shape the renderer needs. Keeps us independent of the
@@ -32,10 +32,10 @@ export interface McpMentionDetails {
 /**
  * Build the component tree for an `mcp-mention` CustomMessage.
  *
- * Collapsed: `[mcp] "server" (ctrl+o to expand)` followed by the user prompt;
- *            only the MCP block is folded.
- * Expanded:   `[mcp] server` header, the `<use-mcp>` block as markdown, and
- *             the user prompt rendered as a separate markdown section below it.
+ * Collapsed: `[mcp] "server" (ctrl+o to expand)`; the MCP block folds and the
+ *            user prompt renders as a separate user-message box below it.
+ * Expanded:  `[mcp] server` header with the `<use-mcp>` block as markdown; the
+ *            user prompt again renders as a separate user-message box below.
  *
  * Returns undefined to fall back to pi's default `[mcp-mention]` box rendering
  * if the message shape is unexpected.
@@ -54,13 +54,21 @@ export function renderMcpMention(
   const label = theme.fg("customMessageLabel", `\x1b[1m[mcp]\x1b[22m`);
 
   const prompt = typeof details.prompt === "string" ? details.prompt.trim() : "";
-  const addPrompt = (): void => {
+  // Match Pi's skill invocation rendering: the user prompt is NOT part of
+  // the collapsible block. It renders as a separate user-message box below,
+  // exactly like UserMessageComponent does for skillBlock.userMessage.
+  const addPrompt = (outer: Container): void => {
     if (!prompt) return;
-    box.addChild(new Spacer(1));
-    box.addChild(new Markdown(prompt, 0, 0, mdTheme, {
-      color: (text) => theme.fg("customMessageText", text),
+    const contentBox = new Box(1, 1, (t) => theme.bg("userMessageBg", t));
+    contentBox.addChild(new Markdown(prompt, 0, 0, mdTheme, {
+      color: (t) => theme.fg("userMessageText", t),
     }));
+    outer.addChild(new Spacer(1));
+    outer.addChild(contentBox);
   };
+
+  const outer = new Container();
+  outer.addChild(box);
 
   if (!options.expanded) {
     const line = label +
@@ -68,18 +76,18 @@ export function renderMcpMention(
       theme.fg("dim", ` (ctrl+o to expand)`);
     box.addChild(new Text(line, 0, 0));
     // Match Pi's skill invocation behavior: the context block folds, but the
-    // original user request remains visible as a separate section.
-    addPrompt();
-    return box;
+    // original user request renders as a separate user message below it.
+    addPrompt(outer);
+    return outer;
   }
 
-  // Expanded: label + server name header + block body + prompt.
+  // Expanded: label + server name header + block body.
   box.addChild(new Text(`${label} ${theme.fg("customMessageText", details.serverName)}`, 0, 0));
   box.addChild(new Spacer(1));
   box.addChild(new Markdown(details.blockText, 0, 0, mdTheme, {
     color: (text) => theme.fg("customMessageText", text),
   }));
 
-  addPrompt();
-  return box;
+  addPrompt(outer);
+  return outer;
 }
